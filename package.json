@@ -1,6 +1,6 @@
 {
   "name": "tabby-user-manager",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Embedded Database User Manager for Tabby Connections and Profiles",
   "main": "dist/index.js",
   "license": "MIT",
