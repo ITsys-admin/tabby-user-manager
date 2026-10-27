@@ -260,4 +260,10 @@ export class UserDatabaseService {
       this.config.save();
     }
   }
+
+  async applyUserToGroups(groupIdOrNames: string[], user: ConnectionUser): Promise<void> {
+    for (const groupId of groupIdOrNames) {
+      await this.applyUserToGroup(groupId, user);
+    }
+  }
 }

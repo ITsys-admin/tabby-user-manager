@@ -54,8 +54,8 @@ import { ConnectionUser } from '../models/user.model';
 
           <!-- Bulk / Group Link Card -->
           <div class="card bg-dark text-white p-3">
-            <h5>Assign User to Profiles / Group</h5>
-            <p class="text-muted small">Bulk apply credentials to multiple selected profiles or an entire profile group.</p>
+            <h5>Assign User to Profiles / Groups</h5>
+            <p class="text-muted small">Bulk apply credentials to multiple selected profiles or entire profile groups.</p>
 
             <div class="form-group mb-2">
               <label>Select User</label>
@@ -68,11 +68,11 @@ import { ConnectionUser } from '../models/user.model';
               <label>Assignment Mode</label>
               <select class="form-select" [(ngModel)]="linkMode">
                 <option value="profiles">Select Multiple Profiles</option>
-                <option value="group">Apply to Entire Group</option>
+                <option value="group">Select Multiple Groups</option>
               </select>
             </div>
 
-            <!-- Multi-select Profile Checkboxes (Showing Group Name) -->
+            <!-- Multi-select Profile Checkboxes -->
             <div class="form-group mb-2" *ngIf="linkMode === 'profiles'">
               <label class="mb-1">Target SSH Profiles:</label>
               <div class="border rounded p-2 bg-black" style="max-height: 150px; overflow-y: auto;">
@@ -86,13 +86,18 @@ import { ConnectionUser } from '../models/user.model';
               </div>
             </div>
 
-            <!-- Group Dropdown (Showing Only Group Name) -->
+            <!-- Multi-select Group Checkboxes -->
             <div class="form-group mb-2" *ngIf="linkMode === 'group'">
-              <label>Select Profile Group</label>
-              <select class="form-select" [(ngModel)]="selectedGroup">
-                <option *ngFor="let g of sshGroups" [value]="g.id">{{ g.name }}</option>
-              </select>
-              <div *ngIf="sshGroups.length === 0" class="text-muted small mt-1">No profile groups defined in Tabby.</div>
+              <label class="mb-1">Target Profile Groups:</label>
+              <div class="border rounded p-2 bg-black" style="max-height: 150px; overflow-y: auto;">
+                <div *ngFor="let g of sshGroups" class="form-check">
+                  <input class="form-check-input" type="checkbox" [id]="'group-' + g.id" [(ngModel)]="selectedGroupIds[g.id]">
+                  <label class="form-check-label text-light small" [for]="'group-' + g.id">
+                    {{ g.name }}
+                  </label>
+                </div>
+                <div *ngIf="sshGroups.length === 0" class="text-muted small text-center">No profile groups defined.</div>
+              </div>
             </div>
 
             <button class="btn btn-success mt-2 w-100" [disabled]="!selectedUserId" (click)="applyCredentials()">
@@ -143,7 +148,7 @@ export class UserManagerSettingsTabComponent implements OnInit {
   selectedUserId: string = '';
   linkMode: 'profiles' | 'group' = 'profiles';
   selectedProfileIds: { [id: string]: boolean } = {};
-  selectedGroup: string = '';
+  selectedGroupIds: { [id: string]: boolean } = {};
   linkSuccessMessage: string = '';
 
   constructor(private userDb: UserDatabaseService) {}
@@ -193,9 +198,10 @@ export class UserManagerSettingsTabComponent implements OnInit {
       await this.userDb.applyUserToProfiles(idsToApply, user);
       this.linkSuccessMessage = `Successfully applied "${user.label}" to ${idsToApply.length} profile(s)!`;
     } else {
-      if (!this.selectedGroup) return;
-      await this.userDb.applyUserToGroup(this.selectedGroup, user);
-      this.linkSuccessMessage = `Successfully applied "${user.label}" to group!`;
+      const groupsToApply = Object.keys(this.selectedGroupIds).filter(id => this.selectedGroupIds[id]);
+      if (groupsToApply.length === 0) return;
+      await this.userDb.applyUserToGroups(groupsToApply, user);
+      this.linkSuccessMessage = `Successfully applied "${user.label}" to ${groupsToApply.length} group(s)!`;
     }
 
     setTimeout(() => {
