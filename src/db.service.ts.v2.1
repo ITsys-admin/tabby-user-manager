@@ -1,0 +1,126 @@
+import { Injectable } from '@angular/core';
+import { ConfigService, ProfilesService } from 'tabby-core';
+import * as path from 'path';
+import * as os from 'os';
+import { ConnectionUser } from './models/user.model';
+
+const Datastore = require('nedb-promises');
+
+@Injectable({ providedIn: 'root' })
+export class UserDatabaseService {
+  private db: any;
+
+  constructor(
+    private config: ConfigService,
+    private profilesService: ProfilesService
+  ) {
+    const appDataPath = process.env.APPDATA || (process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support') : path.join(os.homedir(), '.config'));
+    const dbPath = path.join(appDataPath, 'tabby', 'users_db.json');
+    
+    this.db = Datastore.create({
+      filename: dbPath,
+      autoload: true,
+      timestampData: true
+    });
+  }
+
+  async getAllUsers(): Promise<ConnectionUser[]> {
+    return this.db.find({}).sort({ label: 1 });
+  }
+
+  async getUserById(id: string): Promise<ConnectionUser | null> {
+    return this.db.findOne({ _id: id });
+  }
+
+  async addUser(user: Omit<ConnectionUser, '_id' | 'createdAt' | 'updatedAt'>): Promise<ConnectionUser> {
+    return this.db.insert(user as ConnectionUser);
+  }
+
+  async updateUser(id: string, user: Partial<ConnectionUser>): Promise<number> {
+    const numUpdated = await this.db.update({ _id: id }, { $set: user });
+
+    // Automatically cascade password/credential updates to all linked SSH profiles
+    const updatedUser = await this.getUserById(id);
+    if (updatedUser) {
+      const profiles = this.config.store.profiles;
+      let configChanged = false;
+
+      for (const profile of profiles) {
+        if (profile.type === 'ssh' && profile.options && profile.options.managedUserId === id) {
+          profile.options.user = updatedUser.username;
+          
+          if (updatedUser.authType === 'password') {
+            profile.options.password = updatedUser.password;
+            delete profile.options.privateKeyPath;
+            delete profile.options.passphrase;
+          } else if (updatedUser.authType === 'key') {
+            profile.options.privateKeyPath = updatedUser.privateKeyPath;
+            profile.options.passphrase = updatedUser.passphrase;
+            delete profile.options.password;
+          }
+          configChanged = true;
+        }
+      }
+
+      if (configChanged) {
+        this.config.save();
+      }
+    }
+
+    return numUpdated;
+  }
+
+  async deleteUser(id: string): Promise<number> {
+    // Unlink any profiles tied to this user before deleting from DB
+    const profiles = this.config.store.profiles;
+    let configChanged = false;
+
+    for (const profile of profiles) {
+      if (profile.type === 'ssh' && profile.options && profile.options.managedUserId === id) {
+        delete profile.options.user;
+        delete profile.options.password;
+        delete profile.options.privateKeyPath;
+        delete profile.options.passphrase;
+        delete profile.options.managedUserId;
+        configChanged = true;
+      }
+    }
+
+    if (configChanged) {
+      this.config.save();
+    }
+
+    return this.db.remove({ _id: id }, {});
+  }
+
+  async getSSHProfiles(): Promise<any[]> {
+    const profiles = await this.profilesService.getProfiles();
+    return profiles.filter(p => p.type === 'ssh');
+  }
+
+  async applyUserToProfile(profileId: string, user: ConnectionUser): Promise<void> {
+    const profiles = this.config.store.profiles;
+    const target = profiles.find((p: any) => p.id === profileId);
+    
+    if (target) {
+      if (!target.options) {
+        target.options = {};
+      }
+      
+      target.options.user = user.username;
+      target.options.managedUserId = user._id;
+      
+      if (user.authType === 'password') {
+        target.options.password = user.password;
+        delete target.options.privateKeyPath;
+        delete target.options.passphrase;
+      } else if (user.authType === 'key') {
+        target.options.privateKeyPath = user.privateKeyPath;
+        target.options.passphrase = user.passphrase;
+        delete target.options.password;
+      }
+
+      this.config.save();
+    }
+  }
+}
