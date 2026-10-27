@@ -24,18 +24,6 @@ module.exports = {
           configFile: path.resolve(__dirname, 'tsconfig.json'),
         },
       },
-      {
-        test: /\.scss$/,
-        use: ['to-string-loader', 'css-loader', 'sass-loader'],
-      },
-      {
-        test: /\.css$/,
-        use: ['style-loader', 'css-loader'],
-      },
-      {
-        test: /\.pug$/,
-        use: ['apply-loader', 'pug-loader'],
-      },
     ],
   },
   externals: [

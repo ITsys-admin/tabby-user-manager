@@ -42,8 +42,7 @@ import { ConnectionUser } from '../models/user.model';
             <div class="form-group mb-2" *ngIf="currentUser.authType === 'key'">
               <label>Private Key File Path</label>
               <input type="text" class="form-control" [(ngModel)]="currentUser.privateKeyPath" placeholder="~/.ssh/id_rsa">
-              <label class="mt-2">Passphrase (Optional)</label>
-              <input type="password" class="form-control" [(ngModel)]="currentUser.passphrase">
+              <small class="text-muted">If the key has a passphrase, Tabby will ask for it on first connect.</small>
             </div>
 
             <div class="mt-3">
@@ -104,6 +103,7 @@ import { ConnectionUser } from '../models/user.model';
               Apply to Selection
             </button>
             <div class="text-success small mt-2 text-center" *ngIf="linkSuccessMessage">{{ linkSuccessMessage }}</div>
+            <div class="text-warning small mt-1 text-center" *ngIf="linkWarning">{{ linkWarning }}</div>
           </div>
         </div>
 
@@ -122,7 +122,10 @@ import { ConnectionUser } from '../models/user.model';
               <tr *ngFor="let user of users">
                 <td>{{ user.label }}</td>
                 <td>{{ user.username }}</td>
-                <td><span class="badge bg-info">{{ user.authType }}</span></td>
+                <td>
+                  <span class="badge bg-info">{{ user.authType }}</span>
+                  <span class="badge bg-danger ms-1" *ngIf="user.secretUnreadable" title="Stored password can't be decrypted. Edit the user and re-enter it.">unreadable</span>
+                </td>
                 <td>
                   <button class="btn btn-sm btn-outline-light me-1" (click)="editUser(user)">Edit</button>
                   <button class="btn btn-sm btn-outline-danger" (click)="deleteUser(user._id)">Delete</button>
@@ -150,6 +153,7 @@ export class UserManagerSettingsTabComponent implements OnInit {
   selectedProfileIds: { [id: string]: boolean } = {};
   selectedGroupIds: { [id: string]: boolean } = {};
   linkSuccessMessage: string = '';
+  linkWarning: string = '';
 
   constructor(private userDb: UserDatabaseService) {}
 
@@ -189,7 +193,14 @@ export class UserManagerSettingsTabComponent implements OnInit {
 
   async applyCredentials() {
     if (!this.selectedUserId) return;
-    const user = await this.userDb.getUserById(this.selectedUserId);
+    let user: ConnectionUser | null;
+    try {
+      user = await this.userDb.getUserById(this.selectedUserId);
+    } catch (e) {
+      this.linkSuccessMessage = '';
+      this.linkWarning = String((e as Error).message);
+      return;
+    }
     if (!user) return;
 
     if (this.linkMode === 'profiles') {
@@ -204,9 +215,14 @@ export class UserManagerSettingsTabComponent implements OnInit {
       this.linkSuccessMessage = `Successfully applied "${user.label}" to ${groupsToApply.length} group(s)!`;
     }
 
+    this.linkWarning = (user.authType === 'password' && !this.userDb.isVaultEnabled())
+      ? "The password was saved in plain text in config.yaml. Enable Tabby's vault (Settings → Vault) and encrypt the config file."
+      : '';
+
     setTimeout(() => {
       this.linkSuccessMessage = '';
-    }, 4000);
+      this.linkWarning = '';
+    }, 8000);
   }
 
   resetForm() {
