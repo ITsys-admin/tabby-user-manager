@@ -7,7 +7,6 @@ import { ConnectionUser } from './models/user.model';
 
 const Datastore = require('nedb-promises');
 
-// Encryption Configuration using Node's crypto module with type-safe Buffer handling
 const ENCRYPTION_KEY = crypto.scryptSync(os.hostname() + os.userInfo().username, 'tabby-user-manager-salt', 32);
 const IV_LENGTH = 16;
 
@@ -29,7 +28,6 @@ function decrypt(text?: string): string | undefined {
     const decrypted = Buffer.concat([decipher.update(encryptedText), decipher.final()]);
     return decrypted.toString('utf8');
   } catch (e) {
-    // Fallback if text wasn't encrypted (e.g., legacy plaintext entries)
     return text;
   }
 }
@@ -96,7 +94,6 @@ export class UserDatabaseService {
 
     const numUpdated = await this.db.update({ _id: id }, { $set: secureUpdate });
 
-    // Automatically cascade password/credential updates to all linked SSH profiles
     const updatedUser = await this.getUserById(id);
     if (updatedUser) {
       const profiles = this.config.store.profiles;
@@ -128,7 +125,6 @@ export class UserDatabaseService {
   }
 
   async deleteUser(id: string): Promise<number> {
-    // Unlink and wipe out all related credentials from SSH profiles
     const profiles = this.config.store.profiles;
     let configChanged = false;
 
@@ -152,31 +148,115 @@ export class UserDatabaseService {
 
   async getSSHProfiles(): Promise<any[]> {
     const profiles = await this.profilesService.getProfiles();
-    return profiles.filter(p => p.type === 'ssh');
+    const sshProfiles = profiles.filter(p => p.type === 'ssh');
+    
+    return sshProfiles.map(p => {
+      let groupName = '';
+      if (p.group) {
+        try {
+          groupName = (this.profilesService as any).resolveProfileGroupName 
+            ? (this.profilesService as any).resolveProfileGroupName(p.group) 
+            : p.group;
+        } catch (e) {
+          groupName = p.group;
+        }
+      }
+      return {
+        ...p,
+        groupName: groupName
+      };
+    });
   }
 
-  async applyUserToProfile(profileId: string, user: ConnectionUser): Promise<void> {
-    const profiles = this.config.store.profiles;
-    const target = profiles.find((p: any) => p.id === profileId);
-    
-    if (target) {
-      if (!target.options) {
-        target.options = {};
+  async getSSHGroups(): Promise<{ id: string, name: string }[]> {
+    try {
+      const groups = await (this.profilesService as any).getProfileGroups?.();
+      if (groups && groups.length > 0) {
+        return groups.map((g: any) => ({
+          id: g.id,
+          name: g.name || g.id
+        }));
       }
-      
-      target.options.user = user.username;
-      target.options.managedUserId = user._id;
-      
-      if (user.authType === 'password') {
-        target.options.password = user.password;
-        delete target.options.privateKeyPath;
-        delete target.options.passphrase;
-      } else if (user.authType === 'key') {
-        target.options.privateKeyPath = user.privateKeyPath;
-        target.options.passphrase = user.passphrase;
-        delete target.options.password;
-      }
+    } catch (e) {
+      // Fallback if method is missing
+    }
 
+    const profiles = this.config.store.profiles || [];
+    const groupMap = new Map<string, string>();
+    for (const p of profiles) {
+      if (p.type === 'ssh' && p.group) {
+        const gName = (this.profilesService as any).resolveProfileGroupName 
+          ? (this.profilesService as any).resolveProfileGroupName(p.group) 
+          : p.group;
+        groupMap.set(p.group, gName);
+      }
+    }
+    return Array.from(groupMap.entries()).map(([id, name]) => ({ id, name }));
+  }
+
+  async applyUserToProfiles(profileIds: string[], user: ConnectionUser): Promise<void> {
+    const profiles = this.config.store.profiles;
+    let configChanged = false;
+
+    for (const profileId of profileIds) {
+      const target = profiles.find((p: any) => p.id === profileId);
+      if (target) {
+        if (!target.options) {
+          target.options = {};
+        }
+        target.options.user = user.username;
+        target.options.managedUserId = user._id;
+        
+        if (user.authType === 'password') {
+          target.options.password = user.password;
+          delete target.options.privateKeyPath;
+          delete target.options.passphrase;
+        } else if (user.authType === 'key') {
+          target.options.privateKeyPath = user.privateKeyPath;
+          target.options.passphrase = user.passphrase;
+          delete target.options.password;
+        }
+        configChanged = true;
+      }
+    }
+
+    if (configChanged) {
+      this.config.save();
+    }
+  }
+
+  async applyUserToGroup(groupIdOrName: string, user: ConnectionUser): Promise<void> {
+    const profiles = this.config.store.profiles;
+    let configChanged = false;
+
+    for (const profile of profiles) {
+      if (profile.type === 'ssh') {
+        const matchesGroup = profile.group === groupIdOrName || 
+          ((this.profilesService as any).resolveProfileGroupName && 
+           (this.profilesService as any).resolveProfileGroupName(profile.group) === groupIdOrName);
+
+        if (matchesGroup) {
+          if (!profile.options) {
+            profile.options = {};
+          }
+          profile.options.user = user.username;
+          profile.options.managedUserId = user._id;
+          
+          if (user.authType === 'password') {
+            profile.options.password = user.password;
+            delete profile.options.privateKeyPath;
+            delete profile.options.passphrase;
+          } else if (user.authType === 'key') {
+            profile.options.privateKeyPath = user.privateKeyPath;
+            profile.options.passphrase = user.passphrase;
+            delete profile.options.password;
+          }
+          configChanged = true;
+        }
+      }
+    }
+
+    if (configChanged) {
       this.config.save();
     }
   }

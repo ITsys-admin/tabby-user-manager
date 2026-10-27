@@ -7,7 +7,7 @@ import { ConnectionUser } from '../models/user.model';
   template: `
     <div class="container mt-4">
       <h3>Embedded User Database Manager</h3>
-      <p class="text-muted">Manage reusable credentials and apply them directly to your Tabby SSH profiles.</p>
+      <p class="text-muted">Manage reusable credentials and bulk-apply or group-assign them to your Tabby SSH profiles.</p>
 
       <div class="row">
         <!-- Form Section -->
@@ -52,10 +52,10 @@ import { ConnectionUser } from '../models/user.model';
             </div>
           </div>
 
-          <!-- Link User to SSH Profile Card -->
+          <!-- Bulk / Group Link Card -->
           <div class="card bg-dark text-white p-3">
-            <h5>Link User to SSH Profile</h5>
-            <p class="text-muted small">Apply a saved database user directly to an existing Tabby SSH profile.</p>
+            <h5>Assign User to Profiles / Group</h5>
+            <p class="text-muted small">Bulk apply credentials to multiple selected profiles or an entire profile group.</p>
 
             <div class="form-group mb-2">
               <label>Select User</label>
@@ -65,16 +65,40 @@ import { ConnectionUser } from '../models/user.model';
             </div>
 
             <div class="form-group mb-2">
-              <label>Select SSH Profile</label>
-              <select class="form-select" [(ngModel)]="selectedProfileId">
-                <option *ngFor="let p of sshProfiles" [value]="p.id">{{ p.name }}</option>
+              <label>Assignment Mode</label>
+              <select class="form-select" [(ngModel)]="linkMode">
+                <option value="profiles">Select Multiple Profiles</option>
+                <option value="group">Apply to Entire Group</option>
               </select>
             </div>
 
-            <button class="btn btn-success mt-2" [disabled]="!selectedUserId || !selectedProfileId" (click)="linkUserToProfile()">
-              Apply Credentials to Profile
+            <!-- Multi-select Profile Checkboxes (Showing Group Name) -->
+            <div class="form-group mb-2" *ngIf="linkMode === 'profiles'">
+              <label class="mb-1">Target SSH Profiles:</label>
+              <div class="border rounded p-2 bg-black" style="max-height: 150px; overflow-y: auto;">
+                <div *ngFor="let p of sshProfiles" class="form-check">
+                  <input class="form-check-input" type="checkbox" [id]="'prof-' + p.id" [(ngModel)]="selectedProfileIds[p.id]">
+                  <label class="form-check-label text-light small" [for]="'prof-' + p.id">
+                    {{ p.name }} <span class="text-muted" *ngIf="p.groupName">({{ p.groupName }})</span>
+                  </label>
+                </div>
+                <div *ngIf="sshProfiles.length === 0" class="text-muted small text-center">No SSH profiles found.</div>
+              </div>
+            </div>
+
+            <!-- Group Dropdown (Showing Only Group Name) -->
+            <div class="form-group mb-2" *ngIf="linkMode === 'group'">
+              <label>Select Profile Group</label>
+              <select class="form-select" [(ngModel)]="selectedGroup">
+                <option *ngFor="let g of sshGroups" [value]="g.id">{{ g.name }}</option>
+              </select>
+              <div *ngIf="sshGroups.length === 0" class="text-muted small mt-1">No profile groups defined in Tabby.</div>
+            </div>
+
+            <button class="btn btn-success mt-2 w-100" [disabled]="!selectedUserId" (click)="applyCredentials()">
+              Apply to Selection
             </button>
-            <div class="text-success small mt-2" *ngIf="linkSuccessMessage">{{ linkSuccessMessage }}</div>
+            <div class="text-success small mt-2 text-center" *ngIf="linkSuccessMessage">{{ linkSuccessMessage }}</div>
           </div>
         </div>
 
@@ -112,11 +136,14 @@ import { ConnectionUser } from '../models/user.model';
 export class UserManagerSettingsTabComponent implements OnInit {
   users: ConnectionUser[] = [];
   sshProfiles: any[] = [];
+  sshGroups: { id: string, name: string }[] = [];
   editMode = false;
   currentUser: Partial<ConnectionUser> = { authType: 'password' };
   
   selectedUserId: string = '';
-  selectedProfileId: string = '';
+  linkMode: 'profiles' | 'group' = 'profiles';
+  selectedProfileIds: { [id: string]: boolean } = {};
+  selectedGroup: string = '';
   linkSuccessMessage: string = '';
 
   constructor(private userDb: UserDatabaseService) {}
@@ -128,6 +155,7 @@ export class UserManagerSettingsTabComponent implements OnInit {
   async loadData() {
     this.users = await this.userDb.getAllUsers();
     this.sshProfiles = await this.userDb.getSSHProfiles();
+    this.sshGroups = await this.userDb.getSSHGroups();
   }
 
   async saveUser() {
@@ -154,13 +182,22 @@ export class UserManagerSettingsTabComponent implements OnInit {
     await this.loadData();
   }
 
-  async linkUserToProfile() {
-    if (!this.selectedUserId || !this.selectedProfileId) return;
+  async applyCredentials() {
+    if (!this.selectedUserId) return;
     const user = await this.userDb.getUserById(this.selectedUserId);
     if (!user) return;
 
-    await this.userDb.applyUserToProfile(this.selectedProfileId, user);
-    this.linkSuccessMessage = `Successfully applied "${user.label}" credentials to profile!`;
+    if (this.linkMode === 'profiles') {
+      const idsToApply = Object.keys(this.selectedProfileIds).filter(id => this.selectedProfileIds[id]);
+      if (idsToApply.length === 0) return;
+      await this.userDb.applyUserToProfiles(idsToApply, user);
+      this.linkSuccessMessage = `Successfully applied "${user.label}" to ${idsToApply.length} profile(s)!`;
+    } else {
+      if (!this.selectedGroup) return;
+      await this.userDb.applyUserToGroup(this.selectedGroup, user);
+      this.linkSuccessMessage = `Successfully applied "${user.label}" to group!`;
+    }
+
     setTimeout(() => {
       this.linkSuccessMessage = '';
     }, 4000);
