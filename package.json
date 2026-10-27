@@ -8,6 +8,7 @@
     "type": "git",
     "url": "https://github.com/saljos1985/tabby-user-manager.git"
   },
+  "homepage": "https://github.com/saljos1985/tabby-user-manager",
   "scripts": {
     "build": "webpack --mode production",
     "dev": "webpack --mode development --watch"
