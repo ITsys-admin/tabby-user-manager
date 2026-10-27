@@ -3,7 +3,11 @@
   "version": "1.1.1",
   "description": "Embedded Database User Manager for Tabby Connections and Profiles",
   "main": "dist/index.js",
-  "author": "Joseph Saldana jesaldanat@gmail.com",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "author": "Joseph Saldana",
   "repository": {
     "type": "git",
     "url": "https://github.com/saljos1985/tabby-user-manager.git"
