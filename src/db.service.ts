@@ -2,33 +2,96 @@ import { Injectable } from '@angular/core';
 import { ConfigService, ProfilesService } from 'tabby-core';
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { ConnectionUser } from './models/user.model';
 
 const Datastore = require('nedb-promises');
 
-const ENCRYPTION_KEY = crypto.scryptSync(os.hostname() + os.userInfo().username, 'tabby-user-manager-salt', 32);
-const IV_LENGTH = 16;
+// Cross-platform application data directory resolution
+const getAppDataPath = (): string => {
+  if (process.env.APPDATA) {
+    return process.env.APPDATA;
+  }
+  switch (process.platform) {
+    case 'darwin':
+      return path.join(os.homedir(), 'Library', 'Application Support');
+    case 'win32':
+      return path.join(os.homedir(), 'AppData', 'Roaming');
+    default:
+      return path.join(os.homedir(), '.config');
+  }
+};
+
+const tabbyDir = path.join(getAppDataPath(), 'tabby');
+const keyPath = path.join(tabbyDir, 'user_manager_key.bin');
+
+/**
+ * Retrieves or generates a secure random 256-bit encryption key.
+ * Applies restricted POSIX permissions (0600/0700) on Linux/macOS 
+ * while safely omitting them on Windows to avoid EPERM ACL conflicts.
+ */
+function getOrCreateEncryptionKey(): Buffer {
+  try {
+    const isWindows = process.platform === 'win32';
+    
+    if (!fs.existsSync(tabbyDir)) {
+      // Windows ignores POSIX modes safely; Linux/macOS enforce 0700
+      fs.mkdirSync(tabbyDir, { 
+        recursive: true, 
+        mode: isWindows ? undefined : 0o700 
+      });
+    }
+
+    if (fs.existsSync(keyPath)) {
+      return fs.readFileSync(keyPath);
+    } else {
+      const key = crypto.randomBytes(32);
+      // Windows ignores POSIX modes safely; Linux/macOS enforce 0600
+      fs.writeFileSync(keyPath, key, { 
+        mode: isWindows ? undefined : 0o600 
+      });
+      return key;
+    }
+  } catch (e) {
+    throw new Error('Failed to initialize secure encryption key: ' + (e as Error).message);
+  }
+}
+
+const ENCRYPTION_KEY = getOrCreateEncryptionKey();
+const IV_LENGTH = 12; // Recommended IV length for AES-GCM
 
 function encrypt(text?: string): string | undefined {
   if (!text) return text;
   const iv = crypto.randomBytes(IV_LENGTH);
-  const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
   const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
-  return iv.toString('hex') + ':' + encrypted.toString('hex');
+  const authTag = cipher.getAuthTag();
+  
+  // Format: iv_hex:authTag_hex:encrypted_hex
+  return iv.toString('hex') + ':' + authTag.toString('hex') + ':' + encrypted.toString('hex');
 }
 
-function decrypt(text?: string): string | undefined {
-  if (!text || !text.includes(':')) return text;
+function decrypt(text?: string): string | null {
+  if (!text) return null;
+  const parts = text.split(':');
+  if (parts.length !== 3) {
+    // Invalid format or not GCM encrypted
+    return null;
+  }
   try {
-    const [ivHex, encryptedHex] = text.split(':');
+    const [ivHex, authTagHex, encryptedHex] = parts;
     const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(authTagHex, 'hex');
     const encryptedText = Buffer.from(encryptedHex, 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+
+    const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
+    decipher.setAuthTag(authTag);
     const decrypted = Buffer.concat([decipher.update(encryptedText), decipher.final()]);
     return decrypted.toString('utf8');
   } catch (e) {
-    return text;
+    // Decryption or authentication failed; return null instead of leaking raw text
+    return null;
   }
 }
 
@@ -40,8 +103,7 @@ export class UserDatabaseService {
     private config: ConfigService,
     private profilesService: ProfilesService
   ) {
-    const appDataPath = process.env.APPDATA || (process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support') : path.join(os.homedir(), '.config'));
-    const dbPath = path.join(appDataPath, 'tabby', 'users_db.json');
+    const dbPath = path.join(tabbyDir, 'users_db.json');
     
     this.db = Datastore.create({
       filename: dbPath,
@@ -54,8 +116,8 @@ export class UserDatabaseService {
     const users = await this.db.find({}).sort({ label: 1 });
     return users.map((u: ConnectionUser) => ({
       ...u,
-      password: decrypt(u.password),
-      passphrase: decrypt(u.passphrase)
+      password: decrypt(u.password) ?? undefined,
+      passphrase: decrypt(u.passphrase) ?? undefined
     }));
   }
 
@@ -64,8 +126,8 @@ export class UserDatabaseService {
     if (!user) return null;
     return {
       ...user,
-      password: decrypt(user.password),
-      passphrase: decrypt(user.passphrase)
+      password: decrypt(user.password) ?? undefined,
+      passphrase: decrypt(user.passphrase) ?? undefined
     };
   }
 
@@ -78,8 +140,8 @@ export class UserDatabaseService {
     const inserted = await this.db.insert(secureUser);
     return {
       ...inserted,
-      password: decrypt(inserted.password),
-      passphrase: decrypt(inserted.passphrase)
+      password: decrypt(inserted.password) ?? undefined,
+      passphrase: decrypt(inserted.passphrase) ?? undefined
     };
   }
 
