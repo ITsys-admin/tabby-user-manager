@@ -98,14 +98,14 @@ export class UserDatabaseService {
 
   async getAllUsers(): Promise<ConnectionUser[]> {
     await this.ready;
-    const users = await this.db.find({}).sort({ label: 1 });
+    const users = await this.db.find({ disabled: { $ne: true } }).sort({ label: 1 });
     return users.map((u: any) => this.toPublic(u, false));
   }
 
   /** Strict: throws if the secret can't be decrypted, so garbage is never applied to a profile. */
   async getUserById(id: string): Promise<ConnectionUser | null> {
     await this.ready;
-    const user = await this.db.findOne({ _id: id });
+    const user = await this.db.findOne({ _id: id, disabled: { $ne: true } });
     return user ? this.toPublic(user, true) : null;
   }
 
@@ -138,7 +138,7 @@ export class UserDatabaseService {
 
     const update: any = { $set: set };
     if (Object.keys(unset).length) update.$unset = unset;
-    const numUpdated = await this.db.update({ _id: id }, update);
+    const numUpdated = await this.db.update({ _id: id, disabled: { $ne: true } }, update);
     await this.afterWrite();
 
     const updatedUser = await this.getUserById(id);
@@ -170,9 +170,13 @@ export class UserDatabaseService {
     }
     if (configChanged) await this.config.save();
 
-    const removed = await this.db.remove({ _id: id }, {});
+    // Soft delete: keep the record (label, username, dates) for tracking, but drop its secrets.
+    const disabled = await this.db.update(
+      { _id: id },
+      { $set: { disabled: true, disabledAt: new Date() }, $unset: { password: true, passphrase: true, privateKeyPath: true } }
+    );
     await this.afterWrite();
-    return removed;
+    return disabled;
   }
 
   // ---- Applying a user to Tabby SSH profiles ----
