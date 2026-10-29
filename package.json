@@ -10,11 +10,11 @@
   "author": "Joseph Saldana",
   "repository": {
     "type": "git",
-    "url": "https://github.com/saljos1985/tabby-user-manager.git"
+    "url": "https://github.com/ITsys-admin/tabby-user-manager.git"
   },
-  "homepage": "https://github.com/saljos1985/tabby-user-manager",
+  "homepage": "https://github.com/ITsys-admin/tabby-user-manager",
   "bugs": {
-    "url": "https://github.com/saljos1985/tabby-user-manager/issues"
+    "url": "https://github.com/ITsys-admin/tabby-user-manager/issues"
   },
   "scripts": {
     "build": "webpack --mode production",
