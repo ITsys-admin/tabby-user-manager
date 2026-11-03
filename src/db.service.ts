@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { ConfigService, ProfilesService, VaultService } from 'tabby-core';
+import { ConfigService, ProfilesService, VAULT_SECRET_TYPE_FILE, VaultService } from 'tabby-core';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -8,8 +8,9 @@ import { decrypt, encrypt, loadOrCreateKey, migrateSecret } from './crypto';
 
 const Datastore = require('nedb-promises');
 
-const SECRET_FIELDS = ['password', 'passphrase'] as const;
+const SECRET_FIELDS = ['password', 'passphrase', 'privateKeyPath'] as const;
 const EDITABLE_FIELDS = ['label', 'username', 'authType', 'password', 'privateKeyPath', 'notes'] as const;
+const VAULT_FILE_PREFIX = 'vault://';
 
 @Injectable({ providedIn: 'root' })
 export class UserDatabaseService {
@@ -17,6 +18,7 @@ export class UserDatabaseService {
   private dbPath: string;
   private key: Buffer;
   private ready: Promise<void>;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(
     private config: ConfigService,
@@ -28,8 +30,10 @@ export class UserDatabaseService {
     this.dbPath = path.join(dataDir, 'users_db.json');
     this.db = Datastore.create({ filename: this.dbPath, timestampData: true });
 
-    this.ready = this.init(path.join(dataDir, 'users_db.key'));
-    this.ready.catch(e => console.error('[tabby-user-manager] initialization failed:', e));
+    this.ready = this.init(path.join(dataDir, 'users_db.key')).catch(err => {
+      console.error('[tabby-user-manager] initialization failed:', err);
+      throw err;
+    });
   }
 
   private async init(keyPath: string): Promise<void> {
@@ -37,6 +41,50 @@ export class UserDatabaseService {
     await this.db.load();
     await this.migrateStoredSecrets();
     await this.afterWrite();
+  }
+
+  private validateAuthInput(user: Partial<ConnectionUser>): void {
+    const authType = user.authType;
+    if (authType === undefined) return;
+
+    if (authType === 'password') {
+      if (typeof user.password !== 'string' || user.password.trim() === '') {
+        throw new Error('Password auth requires a non-empty password');
+      }
+      delete user.privateKeyPath;
+      return;
+    }
+
+    if (authType === 'key') {
+      if (typeof user.privateKeyPath !== 'string' || user.privateKeyPath.trim() === '') {
+        throw new Error('Key auth requires a non-empty privateKeyPath');
+      }
+      user.privateKeyPath = this.normalizePrivateKeyPath(user.privateKeyPath);
+      delete user.password;
+      return;
+    }
+
+    delete user.password;
+    delete user.privateKeyPath;
+  }
+
+  private normalizePrivateKeyPath(value?: string): string | undefined {
+    if (!value) return undefined;
+
+    let expanded = value.trim();
+    if (expanded === '~') {
+      expanded = os.homedir();
+    } else if (expanded.startsWith('~/') || expanded.startsWith('~\\')) {
+      expanded = path.join(os.homedir(), expanded.slice(2));
+    }
+
+    const normalized = path.resolve(expanded);
+    try {
+      fs.accessSync(normalized, fs.constants.R_OK);
+    } catch {
+      throw new Error(`Private key is missing or unreadable: ${normalized}`);
+    }
+    return normalized;
   }
 
   /** Upgrades v1.x records (CBC / hostname-derived key / plaintext) to the current format. */
@@ -66,12 +114,42 @@ export class UserDatabaseService {
    * (compaction replaces the file).
    */
   private async afterWrite(): Promise<void> {
-    await new Promise<void>(resolve => {
-      const timer = setTimeout(resolve, 5000); // never block the UI on compaction
-      this.db.once('compactionDone', () => { clearTimeout(timer); resolve(); });
-      this.db.compactDatafile();
-    });
-    await this.lockDown();
+    const run = async (): Promise<void> => {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          this.db.removeListener('compactionDone', onCompactionDone);
+          reject(new Error('Database compaction timed out'));
+        }, 15000);
+
+        const onCompactionDone = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        };
+
+        this.db.once('compactionDone', onCompactionDone);
+        try {
+          this.db.compactDatafile();
+        } catch (err) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.db.removeListener('compactionDone', onCompactionDone);
+          reject(err);
+        }
+      }).catch(err => {
+        console.warn('[tabby-user-manager] compaction failed:', err);
+      });
+
+      await this.lockDown();
+    };
+
+    this.writeQueue = this.writeQueue.then(run, run);
+    await this.writeQueue;
   }
 
   private async lockDown(): Promise<void> {
@@ -91,6 +169,13 @@ export class UserDatabaseService {
     } catch (e) {
       if (strict) throw new Error(`Stored password for "${doc.label}" cannot be decrypted`);
       result.password = undefined;
+      result.secretUnreadable = true;
+    }
+    try {
+      result.privateKeyPath = decrypt(this.key, doc.privateKeyPath, 'privateKeyPath');
+    } catch (e) {
+      if (strict) throw new Error(`Stored private key path for "${doc.label}" cannot be decrypted`);
+      result.privateKeyPath = undefined;
       result.secretUnreadable = true;
     }
     return result;
@@ -120,9 +205,11 @@ export class UserDatabaseService {
   async addUser(user: Omit<ConnectionUser, '_id' | 'createdAt' | 'updatedAt'>): Promise<ConnectionUser> {
     await this.ready;
     const doc = this.pickEditable(user);
+    this.validateAuthInput(doc);
     if (doc.authType !== 'password') delete doc.password;
     if (doc.authType !== 'key') delete doc.privateKeyPath;
-    doc.password = encrypt(this.key, doc.password, 'password');
+    if (doc.authType === 'password') doc.password = encrypt(this.key, doc.password, 'password');
+    if (doc.authType === 'key') doc.privateKeyPath = encrypt(this.key, doc.privateKeyPath, 'privateKeyPath');
     const inserted = await this.db.insert(doc);
     await this.afterWrite();
     return this.toPublic(inserted, true);
@@ -130,9 +217,17 @@ export class UserDatabaseService {
 
   async updateUser(id: string, user: Partial<ConnectionUser>): Promise<number> {
     await this.ready;
+    const existing = await this.db.findOne({ _id: id, disabled: { $ne: true } });
+    if (!existing) return 0;
+
+    const next = { ...this.toPublic(existing, true), ...user };
+    this.validateAuthInput(next);
+
     const set = this.pickEditable(user);
+    if (set.privateKeyPath !== undefined) set.privateKeyPath = this.normalizePrivateKeyPath(set.privateKeyPath);
     const unset: any = {};
     if (set.password !== undefined) set.password = encrypt(this.key, set.password, 'password');
+    if (set.privateKeyPath !== undefined) set.privateKeyPath = encrypt(this.key, set.privateKeyPath, 'privateKeyPath');
     if (set.authType && set.authType !== 'password') { delete set.password; unset.password = true; }
     if (set.authType && set.authType !== 'key') { delete set.privateKeyPath; unset.privateKeyPath = true; }
 
@@ -182,10 +277,8 @@ export class UserDatabaseService {
   // ---- Applying a user to Tabby SSH profiles ----
 
   /**
-   * Writes the user's credentials into one profile using the option names Tabby actually reads
-   * (`auth`, `privateKeys`, `password`). Passwords are written to config.yaml, so Tabby can
-   * connect without asking for the vault passphrase. Protect the file by enabling Tabby's vault
-   * (Settings → Vault), which encrypts the config file.
+   * Writes the user's credentials using the option names Tabby SSH reads. When the vault is
+   * enabled, private key contents are stored there and the profile references them by vault URI.
    */
   private async applyToProfile(profile: any, user: ConnectionUser): Promise<void> {
     profile.options = profile.options ?? {};
@@ -202,8 +295,29 @@ export class UserDatabaseService {
       delete opts.privateKeys;
       opts.password = user.password;
     } else if (user.authType === 'key') {
+      const keyPath = user.privateKeyPath ? this.normalizePrivateKeyPath(user.privateKeyPath) : undefined;
       opts.auth = 'publicKey';
-      opts.privateKeys = user.privateKeyPath ? [user.privateKeyPath] : [];
+      if (keyPath && this.vault.isEnabled()) {
+        if (!user._id) {
+          throw new Error('Save this user before adding its private key to Tabby’s vault.');
+        }
+
+        await this.vault.getPassphrase();
+        const id = `tabby-user-manager-${user._id}`;
+        const contents = await fs.promises.readFile(keyPath);
+        await this.vault.addSecret({
+          type: VAULT_SECRET_TYPE_FILE,
+          key: { id, description: `SSH private key for ${user.label}` },
+          value: contents.toString('base64'),
+        });
+        const stored = await this.vault.getSecret(VAULT_SECRET_TYPE_FILE, { id });
+        if (!stored) {
+          throw new Error('Could not store the private key in Tabby’s vault.');
+        }
+        opts.privateKeys = [`${VAULT_FILE_PREFIX}${id}`];
+      } else {
+        opts.privateKeys = keyPath ? [keyPath] : [];
+      }
       delete opts.password;
     } else {
       opts.auth = 'agent';

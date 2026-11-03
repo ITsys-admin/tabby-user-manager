@@ -49,6 +49,7 @@ import { ConnectionUser } from '../models/user.model';
               <button class="btn btn-primary me-2" (click)="saveUser()">Save User</button>
               <button class="btn btn-secondary" *ngIf="editMode" (click)="resetForm()">Cancel</button>
             </div>
+            <div class="text-danger small mt-2" *ngIf="saveErrorMessage">{{ saveErrorMessage }}</div>
           </div>
 
           <!-- Bulk / Group Link Card -->
@@ -124,7 +125,7 @@ import { ConnectionUser } from '../models/user.model';
                 <td>{{ user.username }}</td>
                 <td>
                   <span class="badge bg-info">{{ user.authType }}</span>
-                  <span class="badge bg-danger ms-1" *ngIf="user.secretUnreadable" title="Stored password can't be decrypted. Edit the user and re-enter it.">unreadable</span>
+                  <span class="badge bg-danger ms-1" *ngIf="user.secretUnreadable" title="A stored secret can't be decrypted. Edit the user and re-enter it.">unreadable</span>
                 </td>
                 <td>
                   <button class="btn btn-sm btn-outline-light me-1" (click)="editUser(user)">Edit</button>
@@ -154,6 +155,7 @@ export class UserManagerSettingsTabComponent implements OnInit {
   selectedGroupIds: { [id: string]: boolean } = {};
   linkSuccessMessage: string = '';
   linkWarning: string = '';
+  saveErrorMessage: string = '';
 
   constructor(private userDb: UserDatabaseService) {}
 
@@ -168,16 +170,24 @@ export class UserManagerSettingsTabComponent implements OnInit {
   }
 
   async saveUser() {
-    if (!this.currentUser.label || !this.currentUser.username) return;
-
-    if (this.editMode && this.currentUser._id) {
-      await this.userDb.updateUser(this.currentUser._id, this.currentUser);
-    } else {
-      await this.userDb.addUser(this.currentUser as any);
+    this.saveErrorMessage = '';
+    if (!this.currentUser.label || !this.currentUser.username) {
+      this.saveErrorMessage = 'Label and username are required.';
+      return;
     }
 
-    this.resetForm();
-    await this.loadData();
+    try {
+      if (this.editMode && this.currentUser._id) {
+        await this.userDb.updateUser(this.currentUser._id, this.currentUser);
+      } else {
+        await this.userDb.addUser(this.currentUser as any);
+      }
+
+      this.resetForm();
+      await this.loadData();
+    } catch (e) {
+      this.saveErrorMessage = e instanceof Error ? e.message : 'Failed to save user.';
+    }
   }
 
   editUser(user: ConnectionUser) {
@@ -203,20 +213,30 @@ export class UserManagerSettingsTabComponent implements OnInit {
     }
     if (!user) return;
 
-    if (this.linkMode === 'profiles') {
-      const idsToApply = Object.keys(this.selectedProfileIds).filter(id => this.selectedProfileIds[id]);
-      if (idsToApply.length === 0) return;
-      await this.userDb.applyUserToProfiles(idsToApply, user);
-      this.linkSuccessMessage = `Successfully applied "${user.label}" to ${idsToApply.length} profile(s)!`;
-    } else {
-      const groupsToApply = Object.keys(this.selectedGroupIds).filter(id => this.selectedGroupIds[id]);
-      if (groupsToApply.length === 0) return;
-      await this.userDb.applyUserToGroups(groupsToApply, user);
-      this.linkSuccessMessage = `Successfully applied "${user.label}" to ${groupsToApply.length} group(s)!`;
+    try {
+      if (this.linkMode === 'profiles') {
+        const idsToApply = Object.keys(this.selectedProfileIds).filter(id => this.selectedProfileIds[id]);
+        if (idsToApply.length === 0) return;
+        await this.userDb.applyUserToProfiles(idsToApply, user);
+        this.linkSuccessMessage = `Successfully applied "${user.label}" to ${idsToApply.length} profile(s)!`;
+      } else {
+        const groupsToApply = Object.keys(this.selectedGroupIds).filter(id => this.selectedGroupIds[id]);
+        if (groupsToApply.length === 0) return;
+        await this.userDb.applyUserToGroups(groupsToApply, user);
+        this.linkSuccessMessage = `Successfully applied "${user.label}" to ${groupsToApply.length} group(s)!`;
+      }
+    } catch (e) {
+      this.linkSuccessMessage = '';
+      this.linkWarning = e instanceof Error ? e.message : 'Failed to apply credentials.';
+      return;
     }
 
-    this.linkWarning = (user.authType === 'password' && !this.userDb.isVaultEnabled())
-      ? "The password was saved in plain text in config.yaml. Enable Tabby's vault (Settings → Vault) and encrypt the config file."
+    this.linkWarning = !this.userDb.isVaultEnabled()
+      ? user.authType === 'password'
+        ? "The password was saved in plain text in config.yaml. Enable Tabby's vault (Settings → Vault) and encrypt the config file."
+        : user.authType === 'key'
+          ? "The private key file path remains in config.yaml. Enable Tabby's vault to store the private key contents there instead."
+          : ''
       : '';
 
     setTimeout(() => {
